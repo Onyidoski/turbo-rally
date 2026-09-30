@@ -404,17 +404,17 @@ export class ItemSystem {
 
   _useItem(kart) {
     const item = kart.item;
-    let consumed = true;
+    let consumed = true, spawn = null;
     try {
       switch (item) {
         case 'mushroom':
         case 'triple_mushroom':
           kart.applyBoost?.(PHYSICS.mushroomBoostTime, 1);
           break;
-        case 'banana': this._spawnBanana(kart); break;
-        case 'green_shell': this._spawnShell(kart, 'green_shell'); break;
-        case 'red_shell': this._spawnShell(kart, 'red_shell'); break;
-        case 'blue_shell': this._spawnBlue(kart); break;
+        case 'banana': this._spawnBanana(kart); spawn = this._describeSpawn('banana'); break;
+        case 'green_shell': this._spawnShell(kart, 'green_shell'); spawn = this._describeSpawn('green_shell'); break;
+        case 'red_shell': this._spawnShell(kart, 'red_shell'); spawn = this._describeSpawn('red_shell'); break;
+        case 'blue_shell': this._spawnBlue(kart); spawn = { kind: 'blue_shell' }; break;
         case 'star': kart.startStar?.(PHYSICS.starTime); break;
         case 'lightning': this._lightning(kart); break;
         default: consumed = true;
@@ -422,7 +422,7 @@ export class ItemSystem {
     } catch (err) {
       console.error('[items] use failed', item, err);
     }
-    bus.emit('item:use', { kart, item: item === 'triple_mushroom' ? 'mushroom' : item });
+    bus.emit('item:use', { kart, item: item === 'triple_mushroom' ? 'mushroom' : item, spawn });
     if (consumed) {
       const count = finite(kart.itemCount, 1) - 1;
       if (item === 'triple_mushroom' && count > 0) {
@@ -449,6 +449,80 @@ export class ItemSystem {
   }
 
   // ------------------------------------------------------------------ pools
+  /** Compact descriptor of the just-spawned entity (MP sync), or null. */
+  _describeSpawn(wantType) {
+    const ents = this.entities;
+    const e = ents.length ? ents[ents.length - 1] : null;
+    if (!e || e.dead || e.pos == null || e.type !== wantType) return null;
+    const n2 = (v) => (Number.isFinite(v) ? Math.round(v * 100) / 100 : 0);
+    if (e.type === 'banana' && !e.flying) return { kind: 'banana', x: n2(e.pos.x), z: n2(e.pos.z) };
+    if (e.type === 'banana') {
+      return { kind: 'banana', flying: true, x: n2(e.pos.x), z: n2(e.pos.z), dx: n2(e.vel.x), dz: n2(e.vel.z) };
+    }
+    return {
+      kind: e.type, x: n2(e.pos.x), z: n2(e.pos.z),
+      dx: n2(e.vel.x), dz: n2(e.vel.z),
+      targetKart: e.target && e.target.position ? e.target : null,
+    };
+  }
+
+  /** Drop a held item + roulette (remote lightning strike). */
+  clearKartItem(kart) {
+    if (!kart) return;
+    kart.item = null;
+    kart.itemCount = 0;
+    this.roulettes.delete(kart);
+  }
+
+  // ------------------------------------------------------------------ MP ghosts (visual-only)
+  spawnGhostShell(kind, x, z, dx, dz, targetKart = null) {
+    try {
+      if (kind === 'banana') {
+        const e = this._makeEntity('banana', null, _v1.set(x, 0, z));
+        e.flying = true;
+        e.pos.y = this._groundHeight(e.pos, e) + 1.2;
+        e.vel.set(dx, 11, dz);
+        e.ghost = true;
+        return e;
+      }
+      const e = this._makeEntity(kind, null, _v1.set(x, 0, z));
+      e.pos.y = this._groundHeight(e.pos, e) + SHELL_HOVER;
+      e.vel.set(dx, 0, dz);
+      e.speed = Math.hypot(dx, dz) || (kind === 'red_shell' ? RED_SPEED : GREEN_SPEED);
+      if (kind === 'red_shell') { e.target = targetKart || null; e.homing = true; }
+      e.ghost = true;
+      return e;
+    } catch { return null; }
+  }
+
+  spawnGhostBanana(x, z) {
+    try {
+      const e = this._makeEntity('banana', null, _v1.set(x, 0, z));
+      e.pos.y = this._groundHeight(e.pos, e);
+      e.holder.rotation.y = Math.random() * Math.PI * 2;
+      e.ghost = true;
+      return e;
+    } catch { return null; }
+  }
+
+  spawnGhostBlue() {
+    try {
+      let anchor = null;
+      for (const k of this.karts) {
+        if (!k || !k.position) continue;
+        if (!anchor || (k.place || 0) > (anchor.place || 0)) anchor = k;
+      }
+      const p = anchor ? anchor.position : _v2.set(0, 0, 0);
+      const e = this._makeEntity('blue_shell', null, _v1.set(p.x, (p.y || 0) + 2.5, p.z));
+      e.t = finite(anchor?.trackT, e.t);
+      e.phase = 'rise';
+      e.alt = 2.5;
+      e.target = this._leader();
+      e.ghost = true;
+      return e;
+    } catch { return null; }
+  }
+
   _acquire(type) {
     const list = this.pools.get(type);
     let h = list && list.length ? list.pop() : null;
@@ -793,7 +867,7 @@ export class ItemSystem {
     for (const k of this.karts) {
       if (!k || !k.position) continue;
       const dx = k.position.x - pos.x, dz = k.position.z - pos.z, dy = k.position.y - pos.y;
-      if (dx * dx + dz * dz < BLUE_RADIUS * BLUE_RADIUS && Math.abs(dy) < 6) this._hitKart(k, 'tumble', 'blue_shell', e.owner);
+      if (!e.ghost && dx * dx + dz * dz < BLUE_RADIUS * BLUE_RADIUS && Math.abs(dy) < 6) this._hitKart(k, 'tumble', 'blue_shell', e.owner);
     }
     e.dead = true;
   }
@@ -816,7 +890,7 @@ export class ItemSystem {
     const karts = this.karts;
     for (let i = 0; i < ents.length; i++) {
       const e = ents[i];
-      if (e.dead || e.type === 'blue_shell') continue;
+      if (e.dead || e.type === 'blue_shell' || e.ghost) continue; // MP ghosts are visual-only; hits are shooter-authoritative
       if (e.type === 'banana' && e.flying && e.vel.y > 0) continue;
       // vs karts
       for (const k of karts) {

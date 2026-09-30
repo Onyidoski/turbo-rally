@@ -1,0 +1,17 @@
+{
+  "name": "turbo-kart-rally",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Turbo Kart Rally — arcade kart racer (single-player + multiplayer)",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js 8080",
+    "test": "node --test server.test.js"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

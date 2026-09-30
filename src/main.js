@@ -10,6 +10,7 @@ import { RaceManager } from './race.js';
 import { HUD } from './hud.js';
 import { Menu } from './menu.js';
 import { AudioEngine } from './audio.js';
+import { createMPSession } from './mp.js';
 
 // ---------------------------------------------------------------------------------------------
 // Error isolation: one failing subsystem must never freeze the loop. Log once per error type.
@@ -137,7 +138,16 @@ const menu = new Menu(uiRoot, {
   onResume: () => resume(),
   onRestart: () => { menu.hideAll(); startRace(lastSettings); },
   onQuit: () => goToTitle(),
+  onMP: (settings) => mp.openSetup({ charIndex: settings.characterIndex, difficulty: settings.difficulty, laps: settings.laps }),
   onScreen: (s) => { setState(s === 'select' ? 'select' : 'title'); },
+});
+// ---- multiplayer session ------------------------------------------------------------
+const MP_START_GRACE_MS = 8000; // fast loaders wait this long after 'start' so slow devices catch up
+const mp = createMPSession({
+  uiRoot,
+  menu,
+  portrait: (ch) => menu.portrait(ch),
+  toast: (msg) => hud.toast(msg),
 });
 let input = null;
 
@@ -168,7 +178,7 @@ const RACE_STATES = new Set(['intro', 'countdown', 'racing', 'finished']);
 // ---------------------------------------------------------------------------------------------
 function shuffle(a) { for (let i = a.length - 1; i > 0; i--) { const j = (Math.random() * (i + 1)) | 0; [a[i], a[j]] = [a[j], a[i]]; } return a; }
 
-function buildWorld({ mode, characterIndex = 0, difficulty = 'normal', laps = RACE.laps }) {
+function buildWorld({ mode, characterIndex = 0, difficulty = 'normal', laps = RACE.laps, mpPlayers = null, mpSlot = 0 }) {
   if (!mods.track || !mods.track.createTrack) throw new Error('track.js unavailable');
   if (!mods.kart || !mods.kart.Kart) throw new Error('kart.js unavailable');
   const w = { mode, difficulty, laps, karts: [], ais: [], playerAI: null, player: null, scene: new THREE.Scene() };
@@ -181,31 +191,35 @@ function buildWorld({ mode, characterIndex = 0, difficulty = 'normal', laps = RA
     chars = [CHARACTERS[characterIndex], ...others];
   } else chars = CHARACTERS.slice();
 
+  const mpEntries = mode === 'mp' && Array.isArray(mpPlayers) && mpPlayers.length
+    ? mpPlayers.slice().sort((a, b) => a.slot - b.slot) : null;
+  const kartCount = mpEntries ? Math.min(mpEntries.length, RACE.racers) : RACE.racers;
   const { Kart } = mods.kart;
-  for (let i = 0; i < RACE.racers; i++) {
-    const character = chars[i % chars.length];
-    const isPlayer = mode === 'race' && i === 0;
+  for (let i = 0; i < kartCount; i++) {
+    const character = mpEntries ? mp.charById(mpEntries[i].charId) : chars[i % chars.length];
+    const isPlayer = mpEntries ? mpEntries[i].slot === mpSlot : (mode === 'race' && i === 0);
     const model = makeKartModel(character);
     const kart = new Kart({ scene: w.scene, track: w.track, character, isPlayer, index: i, model });
     w.karts.push(kart);
     if (isPlayer) w.player = kart;
+    else if (mpEntries) { try { mp.decorateRemote(kart, mpEntries[i]); } catch (e) { report('mp.decorate', e); } }
   }
 
   // grid order: player mid-pack (slot 4 or 5), others shuffled
-  const gridOrder = new Array(RACE.racers);
-  const rest = shuffle(w.karts.filter((k) => k !== w.player));
+  const gridOrder = new Array(kartCount);
+  const rest = mpEntries ? [] : shuffle(w.karts.filter((k) => k !== w.player));
   if (w.player) {
     const slot = 4 + ((Math.random() * 2) | 0);
     gridOrder[slot] = w.player;
   }
-  for (let i = 0; i < gridOrder.length; i++) if (!gridOrder[i]) gridOrder[i] = rest.shift();
+  if (mpEntries) { for (let i = 0; i < w.karts.length; i++) gridOrder[i] = w.karts[i]; } else for (let i = 0; i < gridOrder.length; i++) if (!gridOrder[i]) gridOrder[i] = rest.shift();
 
-  w.race = new RaceManager({ track: w.track, karts: w.karts, player: w.player, laps, silent: mode !== 'race' });
+  w.race = new RaceManager({ track: w.track, karts: w.karts, player: w.player, laps, silent: mode === 'attract' });
   w.race.placeOnGrid(gridOrder);
 
   const AIClass = (mods.ai && mods.ai.AIDriver) || null;
   for (const k of w.karts) {
-    if (k === w.player) continue;
+    if (k === w.player || k.isRemote) continue;
     let ai = null;
     if (AIClass) ai = safe('ai.ctor', () => new AIClass(k, w.track, { difficulty: mode === 'race' ? difficulty : 'hard' }));
     w.ais.push(ai || new FallbackAI(k, w.track));
@@ -217,11 +231,13 @@ function buildWorld({ mode, characterIndex = 0, difficulty = 'normal', laps = RA
   w.ctx = { karts: w.karts, player: w.player || w.karts[0], itemSystem: w.items || null, time: 0 };
   if (w.player) safe('camera.snap', () => w.chase.snap(w.player));
 
+  w.isMP = mode === 'mp';
   renderPass.scene = w.scene;
   return w;
 }
 
 function disposeWorld() {
+  try { mp.detachWorld(); } catch (e) { /* ignore */ }
   const w = world;
   world = null;
   renderPass.scene = fallbackScene;
@@ -317,6 +333,86 @@ function startRace(settings) {
   }, 40);
 }
 
+function startMPRace(players, settings, tRecv) {
+  const myEntry = players.find((p) => p.slot === mp.mySlot) || players[0];
+  const charIdx = Math.max(0, CHARACTERS.findIndex((c) => c.id === (myEntry && myEntry.charId)));
+  lastSettings = { ...lastSettings, characterIndex: charIdx, difficulty: settings.difficulty || 'normal', laps: settings.laps || RACE.laps };
+  hud.hide(); hud.hideResults();
+  menu.hideAll();
+  audio.setPaused(false);
+  audio.stopMusic();
+  setState('loading');
+  setTimeout(() => {
+    disposeWorld();
+    try {
+      world = buildWorld({ mode: 'mp', difficulty: lastSettings.difficulty, laps: lastSettings.laps, mpPlayers: players, mpSlot: mp.mySlot });
+    } catch (e) {
+      report('buildWorld.mp', e);
+      hud.toast('FAILED TO START ONLINE RACE');
+      mp.backToLobby();
+      return;
+    }
+    resultsShown = false;
+    seenErrors.clear();
+    hud.reset({ player: world.player, track: world.track, laps: lastSettings.laps });
+    hud.show();
+    mp.attachWorld({ karts: world.karts, items: world.items || null, player: world.player });
+    audio.setGameplayActive(true);
+    uiRoot.classList.remove('no-world');
+    setState('intro');
+    // sync countdown zero: fast loaders wait until tRecv+GRACE so slow devices catch up
+    const waitMs = (tRecv || performance.now()) + MP_START_GRACE_MS - performance.now();
+    if (waitMs > 60) {
+      menu.showLoading('WAITING FOR RACERS…');
+      setTimeout(() => { if (world && world.isMP && state === 'intro') { menu.hideAll(); beginCountdown(); } }, waitMs);
+    } else beginCountdown(); // straggler: join the race already in progress
+  }, 40);
+}
+
+function showMPResults(order) {
+  if (!world || !world.isMP || resultsShown || !order.length) return;
+  resultsShown = true;
+  if (state === 'paused') resume();
+  const kartsBySlot = new Map();
+  for (const k of world.karts) {
+    if (k.isRemote) kartsBySlot.set(k.mpSlot, k);
+  }
+  if (world.player) kartsBySlot.set(mp.mySlot, world.player);
+  let lastTime = 0;
+  const rows = order.map((o, i) => {
+    const kart = kartsBySlot.get(o.slot);
+    const entry = mp.entryBySlot(o.slot);
+    const ch = (kart && kart.character) || (entry && mp.charById(entry.charId)) || CHARACTERS[i % CHARACTERS.length];
+    let time = o.timeMs != null ? o.timeMs / 1000 : null;
+    const estimated = time == null;
+    if (time == null) time = lastTime + 5 + i * 0.7;
+    lastTime = Math.max(lastTime, time);
+    let bestLap = null;
+    try {
+      if (kart && kart.lapTimes && kart.lapTimes.length) bestLap = Math.min(...kart.lapTimes);
+    } catch (e) { /* ignore */ }
+    return {
+      place: i + 1,
+      kart: kart || world.player,
+      character: ch,
+      name: (entry && entry.name) || ch.name,
+      isPlayer: o.slot === mp.mySlot,
+      time,
+      estimated,
+      bestLap,
+    };
+  });
+  setTimeout(() => {
+    if (!world || !resultsShown) return;
+    audio.playMusic('menu');
+    hud.showResults(rows, {
+      laps: world.race.laps,
+      onRestart: () => mp.backToLobby(),
+      onMenu: () => { mp.leaveRoom(); goToTitle(); },
+    });
+  }, 200);
+}
+
 let introCard = null;
 function showIntroCard() {
   if (!introCard) introCard = Object.assign(document.createElement('div'), { className: 'intro-card' });
@@ -337,7 +433,7 @@ function beginCountdown() {
 }
 
 function pause() {
-  if (!RACE_STATES.has(state) || resultsShown) return;
+  if (!RACE_STATES.has(state) || resultsShown || (world && world.isMP)) return; // no pausing online
   prevState = state;
   setState('paused');
   menu.showPause();
@@ -360,9 +456,21 @@ bus.on('race:go', () => {
 bus.on('race:finish', (d) => {
   if (!world || !d || !d.kart || !d.kart.isPlayer) return;
   setState('finished');
+  if (world.isMP && world.race) { try { mp.net.sendFinish(Math.max(0, Math.round(world.race.raceTime * 1000))); } catch (e) { /* ignore */ } }
   // hand the player's kart to an AI so it keeps cruising during the finish camera
   const AIClass = mods.ai && mods.ai.AIDriver;
   world.playerAI = (AIClass && safe('ai.player', () => new AIClass(world.player, world.track, { difficulty: 'easy' }))) || new FallbackAI(world.player, world.track);
+});
+bus.on('mp:startRace', (d) => {
+  if (!d) return;
+  startMPRace(d.players || [], d.settings || {}, performance.now());
+});
+bus.on('mp:results', (d) => {
+  showMPResults((d && d.order) || []);
+});
+bus.on('mp:close', () => {
+  hud.toast('CONNECTION LOST');
+  goToTitle();
 });
 bus.on('race:end', (d) => {
   if (!world || world.mode !== 'race') return;
@@ -384,9 +492,10 @@ bus.on('race:end', (d) => {
 // Keyboard (global)
 // ---------------------------------------------------------------------------------------------
 window.addEventListener('keydown', (e) => {
+  if (e.target && (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.isContentEditable)) return;
   if (e.code === 'KeyM' && !e.repeat) {
     const muted = audio.toggleMute();
-    hud.toast(muted ? 'SOUND OFF' : 'SOUND ON');
+    hud.toast(muted ? 'SOUND OFF' : 'SOUND ON'); try { const mb = document.getElementById('hud-mutebtn'); if (mb) mb.textContent = muted ? '🔇' : '🔊'; } catch (e) { /* ignore */ }
     return;
   }
   if ((e.code === 'Escape' || e.code === 'KeyP') && !e.repeat) {
@@ -400,7 +509,28 @@ window.addEventListener('keydown', (e) => {
   if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Space'].includes(e.code) && state !== 'boot') e.preventDefault();
 });
 canvas.addEventListener('click', () => { if (state === 'intro') beginCountdown(); });
-document.addEventListener('visibilitychange', () => { if (document.hidden && (state === 'racing' || state === 'countdown')) pause(); });
+document.addEventListener('visibilitychange', () => { if (document.hidden && (state === 'racing' || state === 'countdown') && !(world && world.isMP)) pause(); });
+
+// touch buttons: pause + mute (revealed on touch devices)
+try {
+  const hb = document.getElementById('hud-buttons');
+  const showHb = () => { try { hb && hb.removeAttribute('hidden'); } catch (e) { /* ignore */ } };
+  window.addEventListener('touchstart', showHb, { once: true, passive: true });
+  if ('ontouchstart' in window) showHb();
+  const pauseBtn = document.getElementById('hud-pausebtn');
+  if (pauseBtn) pauseBtn.addEventListener('click', () => { if (state === 'paused') resume(); else pause(); });
+  const muteBtn = document.getElementById('hud-mutebtn');
+  if (muteBtn) muteBtn.addEventListener('click', () => {
+    const muted = audio.toggleMute();
+    hud.toast(muted ? 'SOUND OFF' : 'SOUND ON');
+    try { muteBtn.textContent = muted ? '🔇' : '🔊'; } catch (e) { /* ignore */ }
+  });
+} catch (e) { /* ignore */ }
+
+// kill browser zoom/scroll gestures during play; menus keep pan scroll (see CSS)
+document.addEventListener('gesturestart', (e) => e.preventDefault());
+document.addEventListener('dblclick', (e) => e.preventDefault());
+document.addEventListener('touchmove', (e) => { if (RACE_STATES.has(state)) e.preventDefault(); }, { passive: false });
 
 // ---------------------------------------------------------------------------------------------
 // Attract-mode camera (title / select): cinematic orbit around a kart, or around the track centre
@@ -461,7 +591,7 @@ const debug = { autopilot: false };
 function simulate(w, dt) {
   time += dt;
   w.ctx.time = time;
-  const racing = w.mode === 'race';
+  const racing = w.mode === 'race' || w.isMP;
   const player = w.player;
 
   // player input (always drain the controller so edge-triggered presses don't queue up)
@@ -483,6 +613,7 @@ function simulate(w, dt) {
     }
   }
 
+  if (w.isMP) safe('mp.pre', () => mp.preUpdate(performance.now()));
   for (let i = 0; i < w.ais.length; i++) {
     const ai = w.ais[i];
     try { ai.update(dt, w.ctx); } catch (e) { report('ai.update', e); }
@@ -491,6 +622,7 @@ function simulate(w, dt) {
     try { w.karts[i].update(dt); } catch (e) { report('kart.update', e); }
   }
   if (mods.kart && mods.kart.resolveKartCollisions) safe('resolveKartCollisions', () => mods.kart.resolveKartCollisions(w.karts));
+  if (w.isMP) safe('mp.post', () => mp.postUpdate());
   if (w.items) safe('items.update', () => w.items.update(dt, time));
   safe('race.update', () => w.race.update(dt));
   if (w.effects) safe('effects.update', () => w.effects.update(dt, w.karts));
@@ -499,7 +631,7 @@ function simulate(w, dt) {
   const focus = racing ? player : (w.karts[attractCam.targetIndex] || w.karts[0]);
   if (focus && w.track.setShadowFocus) safe('track.setShadowFocus', () => w.track.setShadowFocus(focus.position));
 
-  if (racing && state === 'intro') {
+  if (racing && state === 'intro' && !w.isMP) {
     introTimer += dt;
     if (introTimer > 4.0) beginCountdown();
   }
@@ -516,7 +648,7 @@ function frame() {
     const running = state !== 'paused' && state !== 'loading' && state !== 'boot';
     if (running) simulate(w, dt);
 
-    if (w.mode === 'race' && w.player) {
+    if ((w.mode === 'race' || w.isMP) && w.player) {
       if (state !== 'paused') {
         const mode = state === 'intro' ? 'intro' : state === 'countdown' ? 'countdown' : state === 'finished' ? 'finish' : 'race';
         const lookBack = !!(state === 'racing' && playerInput && playerInput.lookBack);
@@ -548,6 +680,7 @@ async function boot() {
     const fn = (c) => mods.models.createCharacterPortrait(c);
     safe('portraits', () => menu.setPortraitProvider(fn));
     hud.setPortraitProvider(fn);
+    safe('mp.portraits', () => mp.refreshPortraits());
   }
   buildAttract();
   menu.showTitle();
@@ -563,7 +696,7 @@ window.__game = {
   get state() { return state; },
   get world() { return world; },
   get mods() { return mods; },
-  audio, hud, menu, renderer, camera, bus,
+  audio, hud, menu, renderer, camera, bus, mp,
   startRace: (s = {}) => startRace({ ...lastSettings, ...s }),
   goToTitle,
   skipIntro: () => beginCountdown(),

@@ -30,7 +30,7 @@ const CONTROLS_HTML = `
 export class Menu {
   constructor(uiRoot, handlers = {}) {
     this.uiRoot = uiRoot;
-    this.h = handlers; // { onStart({characterIndex, difficulty, laps}), onResume, onRestart, onQuit }
+    this.h = handlers; // { onStart({characterIndex, difficulty, laps}), onMP({...}), onResume, onRestart, onQuit }
     this.screen = null; // 'title' | 'select' | 'pause' | null
     this.portraitFn = null;
     this.charIndex = 0;
@@ -115,6 +115,7 @@ export class Menu {
             <div class="opt" data-i="0"><span class="opt-lbl">CLASS</span><span class="opt-arrow l">◀</span><span class="opt-val"></span><span class="opt-arrow r">▶</span></div>
             <div class="opt" data-i="1"><span class="opt-lbl">LAPS</span><span class="opt-arrow l">◀</span><span class="opt-val"></span><span class="opt-arrow r">▶</span></div>
             <button class="btn primary race-btn" data-i="2">RACE!</button>
+            <button class="btn mp-btn" data-i="3">MULTIPLAYER</button>
           </div>
         </div>
       </div>
@@ -150,7 +151,7 @@ export class Menu {
         o.querySelector('.r').addEventListener('click', (e) => { e.stopPropagation(); this.zone = 'opts'; this.optIndex = i; this._changeOpt(1); });
         o.querySelector('.opt-val').addEventListener('click', () => { this.zone = 'opts'; this.optIndex = i; this._changeOpt(1); });
       } else {
-        o.addEventListener('click', () => this._start());
+        o.addEventListener('click', () => { if (i === 3) { bus.emit('ui:confirm'); this.h.onMP && this.h.onMP(this.settings); } else this._start(); });
       }
     });
     s.querySelector('.sel-back').addEventListener('click', () => this._toTitle());
@@ -302,11 +303,11 @@ export class Menu {
         if (up) {
           if (this.optIndex === 0) { this.zone = 'grid'; } else this.optIndex--;
           bus.emit('ui:move'); this._refreshFocus();
-        } else if (down) { this.optIndex = Math.min(2, this.optIndex + 1); bus.emit('ui:move'); this._refreshFocus(); }
+        } else if (down) { this.optIndex = Math.min(3, this.optIndex + 1); bus.emit('ui:move'); this._refreshFocus(); }
         else if (left) {
-          if (this.optIndex === 2) { this.zone = 'grid'; bus.emit('ui:move'); this._refreshFocus(); } else this._changeOpt(-1);
+          if (this.optIndex >= 2) { this.zone = 'grid'; bus.emit('ui:move'); this._refreshFocus(); } else this._changeOpt(-1);
         } else if (right) { if (this.optIndex < 2) this._changeOpt(1); }
-        else if (isEnter && !e.repeat) { if (this.optIndex === 2) this._start(); else this._changeOpt(1); }
+        else if (isEnter && !e.repeat) { if (this.optIndex === 2) this._start(); else if (this.optIndex === 3) { bus.emit('ui:confirm'); this.h.onMP && this.h.onMP(this.settings); } else this._changeOpt(1); }
       }
       return;
     }

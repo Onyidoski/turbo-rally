@@ -117,6 +117,62 @@ Open `window.__game` in the browser console for debug hooks such as `startRace()
 
 Turbo Kart Rally is an original, fan-made homage to the kart-racing genre. It is not affiliated with, endorsed by, or associated with Nintendo. All characters, circuits, names, art, music and code in this repository are original.
 
+## Multiplayer (play with friends)
+
+Live server: **https://turbo-kart-rally.onrender.com** — open it on any device,
+pick a character, click MULTIPLAYER, and race: same room code, anywhere in
+the world.
+
+Everyone opens the same server address (e.g. `http://192.168.1.5:8080` on
+your Wi-Fi — this PC's address works for phones on the same network):
+
+1. Pick your character on the select screen, then click **MULTIPLAYER**.
+2. Enter your name and **Create Room** — the lobby shows a 4-letter code.
+3. Friends enter the code and **Join Room**.
+4. The host (room creator) picks the class and lap count, then **Start Race**.
+
+Up to 8 racers per room. Humans only online (no AI fill). Karts, items,
+hits, laps, and results are all synced; if someone disconnects mid-race
+their kart is removed and the race goes on. No pausing online.
+
+Multiplayer needs the Node game server (it hosts the rooms + race sync).
+Single-player also runs under any static server:
+
+```powershell
+cd turbo-kart-rally
+npm install   # once, for the 'ws' package
+npm start     # serves on http://localhost:8080
+```
+
+`npm test` runs the multiplayer protocol tests.
+
+## Install as app (PWA)
+
+The game is installable: open it in Chrome/Edge/Safari and use
+**Install app** (or Add to Home Screen). It runs fullscreen standalone
+with an icon, works offline after the first visit (service worker), and
+locks out browser double-tap zoom, pinch zoom, and pull-to-refresh during
+races — menus still scroll. Touch controls (steer, GAS, BRAKE, DRIFT,
+ITEM, pause, mute) appear on touch devices. After shipping game updates,
+bump `VERSION` in `sw.js` so old caches are purged.
+
+## Deploy (Render)
+
+The game deploys as one always-on Docker web service (`render.yaml`,
+`Dockerfile`, `.dockerignore` are committed). Rooms live in server memory,
+so keep exactly **1 instance** — with 2+, players can land on different
+instances and never see each other's rooms. The free plan sleeps after
+inactivity and drops all rooms, so use **Starter** or higher.
+
+1. Push this repo to your own GitHub/GitLab account.
+2. In the Render dashboard: **New → Blueprint**, pick the repo, and apply
+   `render.yaml` (or **New → Web Service**, runtime **Docker**, health check
+   path `/health`).
+3. Render sets `PORT` automatically; `server.js` reads it.
+
+Verify: `https://<service>.onrender.com/health` returns `{"ok":true,...}`.
+Redeploys happen on every push to the default branch.
+
 ## License
 
 [MIT](LICENSE) © 2026 BridgeMind

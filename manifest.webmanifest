@@ -1,0 +1,16 @@
+{
+  "name": "Turbo Kart Rally",
+  "short_name": "Turbo Kart",
+  "description": "Arcade kart racer: solo vs AI or online multiplayer rooms.",
+  "start_url": "./index.html",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#1a1e5a",
+  "theme_color": "#1a1e5a",
+  "icons": [
+    { "src": "icons/icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png" },
+    { "src": "icons/icon-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}

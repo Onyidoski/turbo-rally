@@ -1,0 +1,9 @@
+services:
+  - type: web
+    name: turbo-kart-rally
+    runtime: docker
+    plan: starter        # always-on; free tier sleeps and drops in-memory rooms
+    region: frankfurt
+    healthCheckPath: /health
+    numInstances: 1      # rooms live in server memory: never scale past 1
+    autoDeploy: true
